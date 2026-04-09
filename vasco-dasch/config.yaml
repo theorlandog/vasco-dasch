@@ -1,0 +1,22 @@
+starglass_api_key: "C8tvySPIUZ2Ak61cPYo8u7geYAT4UxnD9ZCFo1Ga"
+
+dasch:
+  base_url: "https://starglass.cfa.harvard.edu/api"
+  rate_limit_rps: 1.0
+  max_retries: 5
+  backoff_base: 2.0
+
+paths:
+  vasco_catalog: "data/vasco_catalog"
+  dasch_metadata: "data/dasch_metadata"
+  lightcurves: "data/lightcurves"
+  fits_cutouts: "data/fits_cutouts"
+  results: "data/results"
+  db: "data/pipeline.db"
+
+pipeline:
+  date_start: "1949-11-01"
+  date_end: "1957-10-04"
+  checkpoint_interval: 100
+  search_radius_arcsec: 5.0
+  start_with_vetted: true
