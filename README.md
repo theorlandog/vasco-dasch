@@ -157,12 +157,44 @@ All long-running stages are resumable: re-running `run_pipeline.sh` skips
 positions already in `pipeline.db`. Sources at `|Dec| > 88°` are auto-excluded
 because the API times out at the poles.
 
-## Plate-series depth note
+## Why these telescopes?
 
-Not all DASCH series are deep enough for VASCO transients (mag 15–16). Patrol
-cameras (`ai`, `fa`, `ka`) bottom out at mag ~12 and are useful only for
-brighter rate comparisons. The series with limiting magnitudes that actually
-reach VASCO depths are `mc`, `mf`, `rb`, and `b`. Stage 4 filters to those.
+DASCH contains plates from dozens of instruments spanning a century, but only a
+handful are useful for this project. The filter is driven by a single
+requirement: **depth must reach VASCO transient brightness**.
+
+VASCO sources sit at photographic magnitude ~15–16. A plate whose limiting
+magnitude is mag 12 cannot detect a VASCO-brightness transient even in
+principle, no matter how many positions it covers. We measured the median
+`limMagApass` directly from DASCH metadata for every series with plates in the
+1949–1957 window:
+
+| Series | Median lim mag | VASCO detectable? | Window plates (52-pos sample) |
+|--------|---------------:|-------------------|------------------------------:|
+| `mc` (Metcalf)  | 17.0 | **Yes — best**    |    233 |
+| `mf`            | 16.4 | **Yes**           |    389 |
+| `rb`            | 15.8 | **Marginal**      |    585 |
+| `b` (Bache)     | 15.3 | **Marginal**      |    325 |
+| `rh`            | 15.0 | Barely            |  1,772 |
+| `ac`            | 14.1 | No                |  7,419 |
+| `ai`/`fa`/`ka`  | 11.9–12.1 | No           | ~33,000 each |
+
+The patrol-camera series (`ai`, `fa`, `ka`) dominate the plate count by an order
+of magnitude, but their 1.5-inch apertures and short exposures bottom out around
+mag 12. They are only useful as a comparison baseline for *brighter* transient
+rates — not for detecting VASCO-depth flashes.
+
+So Stage 4 filters to `mc`, `mf`, `rb`, `b`. This keeps every plate that *could*
+detect a VASCO transient and discards plates that *couldn't*, regardless of how
+numerous they are.
+
+**Note on the Bache (`b`) series.** A Night-1 hand-analysis of the
+nine-transient field initially highlighted the 8-inch Bache Doublet as the
+closest analogue to Palomar's 48-inch Schmidt. That intuition turned out to be
+only partly right: the b-series peaked in 1885–1920 and had wound down to ~308
+plates in the 1950s, so it contributes far less coverage in the VASCO window
+than `mc` or `mf`. We keep it in the filter because its depth (mag 15.3) is
+still in range, but `mc` and `mf` are the workhorses.
 
 ## Status
 
