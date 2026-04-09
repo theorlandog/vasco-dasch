@@ -145,6 +145,10 @@ After Stage 1: if fewer than 20% of VASCO positions have any DASCH coverage in
 - **MNRAS** — where the triple transient paper appeared
 - **Scientific Reports** — where the nuclear test correlation paper appeared
 
+## Standing Instructions for Claude
+
+At the start of each conversation, review all files in `/notes/` and summarize any new research notes, TODOs, or decisions that are relevant to the current pipeline stage.
+
 ## First Evening Checklist
 
 - [ ] `pip install daschlab astropy photutils requests pandas`

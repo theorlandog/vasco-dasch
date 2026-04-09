@@ -11,13 +11,13 @@ CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
 def db_path() -> Path:
     with open(CONFIG_PATH) as f:
         cfg = yaml.safe_load(f)
-    return Path(__file__).parent.parent.parent / cfg["paths"]["db"]
+    p = Path(__file__).parent.parent.parent / cfg["paths"]["db"]
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def get_conn() -> sqlite3.Connection:
-    p = db_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(p)
+    conn = sqlite3.connect(db_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -31,7 +31,20 @@ def init_db():
             ra          REAL,
             dec         REAL,
             queried_at  TEXT,
-            plate_json  TEXT
+            n_plates    INTEGER,
+            n_window    INTEGER,
+            plates_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS refcat_lookup (
+            vasco_id        TEXT PRIMARY KEY,
+            ra              REAL,
+            dec             REAL,
+            queried_at      TEXT,
+            gsc_bin_index   INTEGER,
+            ref_number      INTEGER,
+            sep_arcsec      REAL,
+            refcat          TEXT
         );
 
         CREATE TABLE IF NOT EXISTS lightcurves (
@@ -56,31 +69,49 @@ def init_db():
 
 def coverage_already_queried(vasco_id: str) -> bool:
     with get_conn() as conn:
-        row = conn.execute(
+        return conn.execute(
             "SELECT 1 FROM plate_coverage WHERE vasco_id = ?", (vasco_id,)
-        ).fetchone()
-        return row is not None
+        ).fetchone() is not None
 
 
-def save_coverage(vasco_id: str, ra: float, dec: float, plates: list):
+def save_coverage(vasco_id: str, ra: float, dec: float,
+                  plates: list, n_window: int):
     with get_conn() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO plate_coverage
-               (vasco_id, ra, dec, queried_at, plate_json)
-               VALUES (?, ?, ?, datetime('now'), ?)""",
-            (vasco_id, ra, dec, json.dumps(plates)),
+               (vasco_id, ra, dec, queried_at, n_plates, n_window, plates_json)
+               VALUES (?, ?, ?, datetime('now'), ?, ?, ?)""",
+            (vasco_id, ra, dec, len(plates), n_window, json.dumps(plates)),
+        )
+
+
+def refcat_already_queried(vasco_id: str) -> bool:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM refcat_lookup WHERE vasco_id = ?", (vasco_id,)
+        ).fetchone() is not None
+
+
+def save_refcat(vasco_id: str, ra: float, dec: float,
+                gsc_bin_index: int, ref_number: int,
+                sep_arcsec: float, refcat: str):
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO refcat_lookup
+               (vasco_id, ra, dec, queried_at, gsc_bin_index, ref_number, sep_arcsec, refcat)
+               VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)""",
+            (vasco_id, ra, dec, gsc_bin_index, ref_number, sep_arcsec, refcat),
         )
 
 
 def lightcurve_already_queried(vasco_id: str) -> bool:
     with get_conn() as conn:
-        row = conn.execute(
+        return conn.execute(
             "SELECT 1 FROM lightcurves WHERE vasco_id = ?", (vasco_id,)
-        ).fetchone()
-        return row is not None
+        ).fetchone() is not None
 
 
-def save_lightcurve(vasco_id: str, ra: float, dec: float, lc: dict):
+def save_lightcurve(vasco_id: str, ra: float, dec: float, lc: list):
     with get_conn() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO lightcurves
@@ -90,17 +121,22 @@ def save_lightcurve(vasco_id: str, ra: float, dec: float, lc: dict):
         )
 
 
-def get_positions_with_coverage(date_start: str, date_end: str):
-    """Return (vasco_id, ra, dec) for positions with plates in the date window."""
+def get_positions_with_window_coverage() -> list:
+    """Return (vasco_id, ra, dec) for positions with plates in the 1949-1957 window."""
     with get_conn() as conn:
-        rows = conn.execute("SELECT vasco_id, ra, dec, plate_json FROM plate_coverage").fetchall()
-    results = []
-    for row in rows:
-        plates = json.loads(row["plate_json"])
-        in_window = [
-            p for p in plates
-            if date_start <= p.get("obs_date", "") <= date_end
-        ]
-        if in_window:
-            results.append((row["vasco_id"], row["ra"], row["dec"]))
-    return results
+        rows = conn.execute(
+            "SELECT vasco_id, ra, dec FROM plate_coverage WHERE n_window > 0"
+        ).fetchall()
+    return [(r["vasco_id"], r["ra"], r["dec"]) for r in rows]
+
+
+def get_refcat_for_lightcurve() -> list:
+    """Return rows needed to query lightcurves: (vasco_id, ra, dec, gsc_bin_index, ref_number, refcat)."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT r.vasco_id, r.ra, r.dec, r.gsc_bin_index, r.ref_number, r.refcat
+            FROM refcat_lookup r
+            JOIN plate_coverage p ON r.vasco_id = p.vasco_id
+            WHERE p.n_window > 0
+        """).fetchall()
+    return [dict(r) for r in rows]
