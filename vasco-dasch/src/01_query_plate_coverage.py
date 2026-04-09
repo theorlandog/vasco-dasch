@@ -17,6 +17,7 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils.dasch_api import DASCHClient, parse_csv_response
@@ -83,6 +84,8 @@ def main():
     parser.add_argument("--catalog", default=None,
                         choices=["vetted", "full", "test"],
                         help="Which catalog to use (default: auto-detect)")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="Number of parallel query threads (default 4)")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -114,50 +117,65 @@ def main():
 
     sources = list(df.itertuples(index=False))
     total = len(sources)
+    n_workers = args.workers
 
     print(f"\nQuerying DASCH plate coverage for {total} sources")
     print(f"Window: {date_start} – {date_end}")
+    print(f"Parallel workers: {n_workers}")
     print(f"Checkpoint every {checkpoint_n} queries\n")
 
-    with tqdm(total=total, unit="src") as pbar:
-        for row in sources:
-            vasco_id = str(row.source_id)
-            ra = float(row.ra)
-            dec = float(row.dec)
+    # Pre-filter: skip polar and already-queried sources
+    to_query = []
+    for row in sources:
+        vasco_id = str(row.source_id)
+        ra = float(row.ra)
+        dec = float(row.dec)
 
-            # Skip near-polar sources: |Dec| > 88° causes API timeouts
-            # because thousands of overlapping plates exceed the Lambda response limit
-            if abs(dec) > 88.0:
-                tqdm.write(f"  SKIP polar source {vasco_id} (Dec={dec:.1f}°)")
-                save_coverage(vasco_id, ra, dec, [], 0)
-                n_errors += 1
+        if abs(dec) > 88.0:
+            save_coverage(vasco_id, ra, dec, [], 0)
+            n_errors += 1
+            continue
+
+        if coverage_already_queried(vasco_id):
+            n_skipped += 1
+            continue
+
+        to_query.append((vasco_id, ra, dec))
+
+    print(f"Skipped {n_skipped} already-queried, {n_errors} polar")
+    print(f"Querying {len(to_query)} remaining sources\n")
+
+    # Each worker gets its own client to avoid shared rate-limit state
+    def make_client():
+        return DASCHClient()
+
+    def worker_fn(item):
+        vasco_id, ra, dec = item
+        c = make_client()
+        try:
+            plates, n_window = query_one(c, vasco_id, ra, dec, date_start, date_end)
+            return (vasco_id, ra, dec, plates, n_window, None)
+        except Exception as e:
+            return (vasco_id, ra, dec, [], 0, e)
+
+    with tqdm(total=len(to_query), unit="src", initial=0) as pbar:
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(worker_fn, item): item for item in to_query}
+            for future in as_completed(futures):
+                vasco_id, ra, dec, plates, n_window, err = future.result()
+                if err:
+                    tqdm.write(f"  ERROR {vasco_id} ({ra:.4f},{dec:.4f}): {err}")
+                    n_errors += 1
+                    save_coverage(vasco_id, ra, dec, [], 0)
+                else:
+                    save_coverage(vasco_id, ra, dec, plates, n_window)
+                    n_queried += 1
+                    if n_window > 0:
+                        n_with_coverage += 1
+
                 pbar.update(1)
-                pbar.set_postfix(queried=n_queried, skipped=n_skipped,
+                pbar.set_postfix(queried=n_queried,
                                  coverage=n_with_coverage, errors=n_errors)
-                continue
-
-            if coverage_already_queried(vasco_id):
-                n_skipped += 1
-                pbar.update(1)
-                pbar.set_postfix(queried=n_queried, skipped=n_skipped,
-                                 coverage=n_with_coverage, errors=n_errors)
-                continue
-
-            try:
-                plates, n_window = query_one(client, vasco_id, ra, dec, date_start, date_end)
-                save_coverage(vasco_id, ra, dec, plates, n_window)
-                n_queried += 1
-                if n_window > 0:
-                    n_with_coverage += 1
-            except Exception as e:
-                tqdm.write(f"  ERROR {vasco_id} ({ra:.4f},{dec:.4f}): {e}")
-                n_errors += 1
-                # Save empty coverage so we don't retry on resume
-                save_coverage(vasco_id, ra, dec, [], 0)
-
-            pbar.update(1)
-            pbar.set_postfix(queried=n_queried, skipped=n_skipped,
-                             coverage=n_with_coverage, errors=n_errors)
 
     print(f"\n=== Stage 1 Complete ===")
     print(f"Newly queried : {n_queried}")
