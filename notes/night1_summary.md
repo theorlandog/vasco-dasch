@@ -190,9 +190,22 @@ Plan:
 3. Run vetted Stage 4 filtered to mc+mf+rb+b series only (~120 GB)
 
 ### Processes running
-- **Stage 1 (test):** PID 84697, ~59/200 sources, ~1 hour remaining
-- **Stage 1 (vetted):** PID 108198, 5,399 sources, ~24 hours
-- **Stage 4 (test):** PID 98367, downloading FITS, ~32 hours
+- **Stage 1 (test):** complete (200/200)
+- **Stage 1 (vetted):** 338/5,399, parallelized to 4 workers, ~4 hours remaining
+- **Stage 4 (test):** stopped after validating pipeline (739 FITS, 2.1 GB kept for reference)
+
+### Parallelization speedup
+Stage 1 was rewritten to use `ThreadPoolExecutor` with `--workers N` flag.
+Each worker gets its own `DASCHClient` instance. The API response time (15-20s)
+was the bottleneck, not our rate limit (0.5 req/sec). With 4 workers:
+~1 position per 4 seconds vs ~1 per 17 seconds = **~4x speedup**.
+Vetted ETA dropped from ~22 hours to ~5.5 hours.
+
+### Disk usage
+- `data/pipeline.db`: 3.4 GB (growing as vetted queries complete, est ~8 GB final)
+- `data/fits_cutouts/`: 2.1 GB (test FITS, kept for reference)
+- Free disk: 288 GB
+- Peak usage estimate: ~200 GB (after vetted deep FITS download)
 
 ---
 
