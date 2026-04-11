@@ -1,7 +1,8 @@
 # VASCO × DASCH Cross-Match Pipeline
 
-An independent test of the VASCO transient claims, cross-matching the published
-catalog of pre-Sputnik flashes against Harvard's DASCH DR7 plate archive.
+An independent test of the VASCO transient claims using Harvard's DASCH DR7
+plate archive to build an independent transient catalog via consecutive
+plate-pair differencing.
 
 ## Background and motivation
 
@@ -27,54 +28,59 @@ That's the gap this project fills. Whatever the result — confirmation,
 constraint, or refutation — it is publishable, because it is the first
 cross-instrument check of VASCO using a fully independent telescope archive.
 
-We explicitly are **not** trying to catch the same flash on a Harvard plate
-(probability ~0% given exposure timing). The science questions are statistical:
-
-1. Do Harvard plates show a comparable transient rate at VASCO positions?
-2. Is the Earth-shadow deficit reproduced in DASCH detections?
-3. Does the nuclear-test temporal correlation hold up on a second telescope?
-4. Do VASCO positions cluster spatially in a way consistent with reflective
-   objects, or is the distribution consistent with noise?
-
 ## Approach
 
-For each VASCO source, ask DASCH: *what plates from 1949–1957 cover this sky
-position, and is anything detected there?* Sources with Harvard coverage but
-no modern (APASS) catalog match at that location are the primary candidates —
-they represent positions that were genuinely empty in modern data, so any
-detection on a 1949–1957 Harvard plate is interesting.
+We detect transients the same way POSS-I did: **compare consecutive exposures
+from the same detector**. A source present on plate A but absent on plate B
+(same telescope series, taken within 30 days) is a transient candidate. This
+produces an independent Harvard transient catalog that we compare to VASCO
+statistically.
 
-The pipeline is built around the DASCH StarGlass API
-(`api.starglass.cfa.harvard.edu/full`), with checkpointed SQLite storage and
-resumable stages so multi-day runs can be interrupted safely.
+We explicitly are **not** trying to catch the same flash on a Harvard plate
+(probability ~0% given exposure timing). The science questions are:
+
+1. Do Harvard plates show a comparable transient rate to POSS-I?
+2. Is the Earth-shadow deficit reproduced in DASCH detections?
+3. Do Harvard transients cluster spatially near VASCO positions?
+4. Does the nuclear-test temporal correlation hold on a second telescope?
 
 ## Data pipeline
 
 ```mermaid
 flowchart TD
-    A[VASCO catalog<br/>vetted_5399.csv] --> S0[Stage 0<br/>Validate catalog]
-    S0 --> S1[Stage 1<br/>queryexps per position]
-    S1 -->|plate metadata| DB[(pipeline.db<br/>SQLite)]
-    S1 --> S2[Stage 2<br/>APASS modern-catalog check]
-    S2 -->|match / no match| DB
-    DB --> S3[Stage 3<br/>Classify candidates]
-    S3 --> CAND[candidates.csv<br/>TRULY_ABSENT_WITH_COVERAGE]
-    CAND --> GATE{Go / No-Go<br/>≥20% coverage?}
-    GATE -->|yes| S4[Stage 4<br/>FITS cutout download<br/>mc+mf+rb+b series]
-    GATE -->|no| STOP[Rethink scope]
-    S4 --> FITS[(data/fits_cutouts/)]
-    FITS --> S5[Stage 5<br/>photutils source extraction<br/>+ PSF analysis]
-    S5 --> HUMAN[Human visual<br/>inspection of flags]
-    HUMAN --> S6[Stage 6<br/>Statistical tests]
-    S6 --> R1[Rate comparison<br/>vs POSS-I]
-    S6 --> R2[Spatial correlation<br/>nearest-neighbor MC]
-    S6 --> R3[Earth shadow<br/>deficit test]
-    S6 --> R4[Nuclear test<br/>temporal correlation]
-    R1 --> S9[Stage 9<br/>Figures + draft]
-    R2 --> S9
-    R3 --> S9
-    R4 --> S9
+    A[VASCO catalog] --> S1[Stage 1<br/>queryexps per<br/>VASCO position]
+    G[Full-sky grid] --> S1b[Stage 1b<br/>queryexps per<br/>grid position]
+    S1 -->|plate metadata| DB[(pipeline.db)]
+    S1b -->|plate metadata| DB
+    DB --> PP[Plate pair builder<br/>group by series<br/>consecutive + ≤30d gap]
+    PP --> S4[Stage 4<br/>Download FITS pairs<br/>mc+mf+rb+b]
+    S4 --> S5[Stage 5<br/>DAOStarFinder on both plates<br/>WCS overlap filter<br/>cross-match + SNR cut]
+    S5 --> HT[harvard_transients.csv]
+    HT --> S6[Stage 6<br/>Rate comparison<br/>vs POSS-I]
+    HT --> S7[Stage 7<br/>Spatial correlation<br/>vs VASCO positions]
+    HT --> S8[Stage 8<br/>Earth shadow<br/>deficit test]
+    S6 --> S9[Stage 9<br/>Figures + draft]
+    S7 --> S9
+    S8 --> S9
 ```
+
+### Transient detection method
+
+```mermaid
+flowchart LR
+    PA[Plate A<br/>DAOStarFinder] --> OV{In WCS<br/>overlap?}
+    PB[Plate B<br/>DAOStarFinder] --> OV
+    OV -->|yes| XM{Cross-match<br/>30 arcsec}
+    XM -->|matched| STAR[Persistent source]
+    XM -->|unmatched| SNR{SNR > 10?}
+    SNR -->|yes| TC[Transient<br/>candidate]
+    SNR -->|no| NOISE[Noise]
+```
+
+Sources are only compared within the **WCS footprint overlap** of both plates,
+eliminating false transients from plate-edge effects. The SNR cut ensures that
+bright sources (which should appear on both plates of similar depth) are the
+only candidates — faint threshold detections are discarded.
 
 ### Stage interactions with the DASCH API
 
@@ -86,76 +92,14 @@ sequenceDiagram
     P->>DB: already queried?
     DB-->>P: no
     P->>API: POST /dasch/dr7/queryexps {ra, dec}
-    Note right of API: ~15–20 s/position<br/>Lambda buffered
-    API-->>P: CSV rows (plate_id, date, exp, lim_mag, ...)
-    P->>P: filter to 1949-11-01 .. 1957-10-04
+    Note right of API: ~4–17 s/position<br/>Lambda buffered
+    API-->>P: CSV rows (plate_id, date, series, lim_mag, ...)
+    P->>P: filter to deep series in 1949–1957 window
     P->>DB: insert plate rows + checkpoint
-    P->>API: POST /dasch/dr7/querycat {refcat=APASS, ra, dec, r}
-    API-->>P: APASS matches (or empty)
-    P->>DB: insert match flag
 ```
 
-Four worker threads run `queryexps` in parallel; the API response time (not
-our 0.5 req/s rate limit) is the bottleneck, so concurrency gives a clean ~4x
-speedup. Checkpoints land every 100 queries so a crash loses at most a minute
-of work.
-
-### Candidate classification
-
-```mermaid
-flowchart LR
-    V[VASCO source] --> Q{Harvard<br/>coverage<br/>1949–1957?}
-    Q -->|no| N1[NO_COVERAGE]
-    Q -->|yes| M{APASS match<br/>at position?}
-    M -->|yes| FP[MODERN_MATCH<br/>likely false positive]
-    M -->|no| TGT[TRULY_ABSENT<br/>WITH_COVERAGE<br/><b>primary target</b>]
-    TGT --> F4[Stage 4 FITS]
-```
-
-## Repository layout
-
-```
-vasco-dasch/
-├── config.yaml                  # API config, paths, parameters
-├── pyproject.toml               # poetry-managed dependencies
-├── run_pipeline.sh              # master script, runs stages 0–3
-├── data/
-│   ├── vasco_catalog/           # input catalogs
-│   ├── pipeline.db              # SQLite: plates, matches, candidates
-│   ├── fits_cutouts/            # downloaded plate images
-│   └── results/                 # candidate lists, figures
-├── src/
-│   ├── 00_fetch_vasco_catalog.py
-│   ├── 01_query_plate_coverage.py     # Stage 1, parallelized
-│   ├── 02_retrieve_lightcurves.py     # APASS check
-│   ├── 03_filter_candidates.py
-│   ├── 04_download_fits.py
-│   ├── 05_source_extraction.py        # photutils + PSF
-│   ├── 06_rate_comparison.py
-│   ├── 07_spatial_correlation.py
-│   ├── 08_shadow_analysis.py
-│   ├── 09_generate_figures.py
-│   └── utils/                          # API client, coords, db, stats
-└── tests/
-```
-
-## Running the pipeline
-
-```bash
-poetry install                                  # first time only
-poetry run python tests/test_api_connection.py  # smoke test
-
-./run_pipeline.sh --catalog vetted              # stages 0–3, overnight
-# review candidates, then:
-poetry run python src/04_download_fits.py --limit 50
-poetry run python src/05_source_extraction.py
-poetry run python src/06_rate_comparison.py
-poetry run python src/09_generate_figures.py
-```
-
-All long-running stages are resumable: re-running `run_pipeline.sh` skips
-positions already in `pipeline.db`. Sources at `|Dec| > 88°` are auto-excluded
-because the API times out at the poles.
+Two worker threads query in parallel with batched futures (≤4 in flight at a
+time) to avoid OOM. Checkpoints land every 100 queries.
 
 ## Why these telescopes?
 
@@ -188,11 +132,77 @@ So Stage 4 filters to `mc`, `mf`, `rb`, `b`. This keeps every plate that *could*
 detect a VASCO transient and discards plates that *couldn't*, regardless of how
 numerous they are.
 
-## Status
+## Consecutive plate pairs
 
-Stage 1 is currently running on the vetted 5,399-source catalog with 4 parallel
-workers; ETA ~5 hours. The full 107,875-source catalog is not publicly available
-and must be requested from the authors.
+Transient detection requires comparing two plates of the same field. We build
+pairs by:
+
+1. Grouping all deep-series window plates by telescope series
+2. Sorting each group by observation date
+3. Pairing consecutive plates (plate N with plate N+1)
+4. Filtering to pairs with ≤30 day gap
+
+The 30-day gap filter keeps 64% of all possible consecutive pairs while
+excluding multi-month gaps where variable stars would contaminate the sample.
+41% of pairs are same-night or next-day, closest to POSS-I's method.
+
+## Full-sky coverage
+
+The VASCO catalog only covers Dec > -3.3° (northern sky). To avoid biasing the
+Harvard transient sample, we also query a full-sky grid at 5° spacing (Stage 1b),
+covering Dec -85° to +85°. This picks up deep-series plates in the southern
+hemisphere — particularly `mf` and `rb` series, which have strong southern
+coverage.
+
+## Repository layout
+
+```
+vasco-dasch/
+├── config.yaml                  # API config, paths, parameters
+├── pyproject.toml               # poetry-managed dependencies
+├── run_pipeline.sh              # master script, runs stages 0–1
+├── data/
+│   ├── vasco_catalog/           # input catalogs
+│   ├── pipeline.db              # SQLite: plates, transients, results
+│   ├── fits_cutouts/            # downloaded plate pair images
+│   └── results/                 # analysis outputs, figures
+├── src/
+│   ├── 00_fetch_vasco_catalog.py
+│   ├── 01_query_plate_coverage.py     # Stage 1, parallelized
+│   ├── 01b_query_full_sky.py          # full-sky grid inventory
+│   ├── 04_download_fits.py            # download plate pairs
+│   ├── 05_source_extraction.py        # plate-pair differencing
+│   ├── 06_rate_comparison.py          # Harvard vs POSS-I rate
+│   ├── 07_spatial_correlation.py      # Harvard ↔ VASCO clustering
+│   ├── 08_shadow_analysis.py          # Earth shadow deficit
+│   ├── 09_generate_figures.py
+│   └── utils/
+│       ├── dasch_api.py               # API wrapper
+│       ├── plate_pairs.py             # consecutive pair builder
+│       ├── database.py                # SQLite storage layer
+│       └── statistics.py              # statistical test functions
+└── tests/
+```
+
+## Running the pipeline
+
+```bash
+poetry install                                          # first time only
+
+# Plate inventory (already complete for vetted set)
+./run_pipeline.sh --catalog vetted                      # stages 0–1
+poetry run python src/01b_query_full_sky.py             # full-sky grid
+
+# Transient detection and analysis
+poetry run python src/04_download_fits.py               # download plate pairs
+poetry run python src/05_source_extraction.py           # detect transients
+poetry run python src/06_rate_comparison.py             # rate test
+poetry run python src/07_spatial_correlation.py         # clustering test
+poetry run python src/08_shadow_analysis.py             # shadow deficit
+poetry run python src/09_generate_figures.py
+```
+
+All long-running stages are resumable — re-running skips already-completed work.
 
 ## References
 
